@@ -72,13 +72,6 @@ sudo ./malcolm 192.168.0.10 aa:bb:cc:dd:ee:ff 192.168.0.20 11:22:33:44:55:66
 
 ---
 
-## 🖼 ARP Spoofing 동작 흐름
-추가 예정
-
-## 🖼 ARP Spoofing 흐름 개요
-
----
-
 ## 🧠 학습한 내용
 
 - `AF_PACKET`, `SOCK_RAW` 기반 저수준 소켓 프로그래밍
