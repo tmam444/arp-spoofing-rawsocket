@@ -89,6 +89,40 @@ void make_arp_packet(unsigned char *buffer)
   cur_arp->hdr.ar_op  = htons(ARPOP_REPLY);  // ARP 응답 (2)
 }
 
+// Simple IPv6 pseudo-header checksum calculation
+static uint16_t calculate_ipv6_checksum(const struct in6_addr *src, const struct in6_addr *dst, 
+                                        uint32_t length, uint8_t next_header, const void *data)
+{
+  uint32_t sum = 0;
+  uint16_t *ptr;
+  int i;
+
+  // Add source address
+  ptr = (uint16_t *)src;
+  for (i = 0; i < 8; i++)
+    sum += ntohs(ptr[i]);
+
+  // Add destination address  
+  ptr = (uint16_t *)dst;
+  for (i = 0; i < 8; i++)
+    sum += ntohs(ptr[i]);
+
+  // Add length and next header
+  sum += length;
+  sum += next_header;
+
+  // Add data
+  ptr = (uint16_t *)data;
+  for (i = 0; i < (int)(length / 2); i++)
+    sum += ntohs(ptr[i]);
+
+  // Add carry
+  while (sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16);
+
+  return (uint16_t)(~sum);
+}
+
 void make_ndp_packet(unsigned char *buffer)
 {
   struct ethhdr         *cur_eth = (struct ethhdr *)buffer;
@@ -111,7 +145,7 @@ void make_ndp_packet(unsigned char *buffer)
   // ICMPv6 NDP header
   cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_type = ICMPV6_ND_NA; // Neighbor Advertisement
   cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_code = 0;
-  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Will be calculated later
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Will be calculated below
   cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_data32[0] = htonl(0x60000000); // R=0, S=1, O=1 flags
 
   // Target IPv6 address
@@ -122,8 +156,14 @@ void make_ndp_packet(unsigned char *buffer)
   cur_ipv6_ndp->ndp.option_length = 1; // 8 bytes
   ft_memcpy(cur_ipv6_ndp->ndp.target_mac, data.source_mac, sizeof(data.source_mac));
 
-  // Calculate ICMPv6 checksum (simplified - should use pseudo-header)
-  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0;
+  // Calculate ICMPv6 checksum
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = calculate_ipv6_checksum(
+    &cur_ipv6_ndp->ipv6_hdr.ip6_src,
+    &cur_ipv6_ndp->ipv6_hdr.ip6_dst,
+    sizeof(struct ndp_packet),
+    IPPROTO_ICMPV6,
+    &cur_ipv6_ndp->ndp
+  );
 }
 
 void *send_fake_arp_reply(void *arg)

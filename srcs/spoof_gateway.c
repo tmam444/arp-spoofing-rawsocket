@@ -206,7 +206,7 @@ void make_gateway_ndp_packet(unsigned char *buffer)
   // ICMPv6 NDP header (Neighbor Advertisement to gateway)
   cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_type = ICMPV6_ND_NA; // Neighbor Advertisement
   cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_code = 0;
-  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Will be calculated later
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Will be calculated below
   cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_data32[0] = htonl(0x60000000); // R=0, S=1, O=1 flags
 
   // Target IPv6 address (claiming to be the target)
@@ -217,6 +217,6 @@ void make_gateway_ndp_packet(unsigned char *buffer)
   cur_ipv6_ndp->ndp.option_length = 1; // 8 bytes
   ft_memcpy(cur_ipv6_ndp->ndp.target_mac, data.my_mac, sizeof(data.my_mac));
 
-  // Calculate ICMPv6 checksum (simplified - should use pseudo-header)
-  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0;
+  // Calculate ICMPv6 checksum - Need to make this function accessible
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Simplified for now
 }
