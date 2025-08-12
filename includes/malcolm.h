@@ -46,6 +46,7 @@
 #define MAC_ADDR_LEN 6
 #define IP_ADDR_LEN  4
 #define BUFFER_SIZE  65535
+#define SPOOF_INTERVAL_SEC 5  // Optimized: increased from 3 to 5 seconds
 
 // PCAP file header structure
 struct pcap_file_header
@@ -108,6 +109,12 @@ struct thread_arg
     __be16         protocol;
 };
 
+// Optimized: Buffer pool for reducing allocations
+#define THREAD_ARG_POOL_SIZE 4
+extern struct thread_arg thread_arg_pool[THREAD_ARG_POOL_SIZE];
+extern unsigned char buffer_pool[THREAD_ARG_POOL_SIZE][BUFFER_SIZE];
+extern bool pool_used[THREAD_ARG_POOL_SIZE];
+
 struct arp_packet
 {
     struct arphdr hdr;           // ARP 헤더
@@ -142,5 +149,9 @@ void make_gateway_arp_packet(unsigned char *buffer);
 
 // send thread func
 void *send_fake_arp_reply(void *arg);
+
+// Optimized: Buffer pool management functions
+struct thread_arg *get_thread_arg_from_pool(void);
+void return_thread_arg_to_pool(struct thread_arg *arg);
 
 #endif

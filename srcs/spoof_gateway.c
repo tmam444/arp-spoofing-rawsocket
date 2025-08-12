@@ -79,7 +79,10 @@ static void get_gateway_ip()
   }
 
   // 첫 번째 줄은 헤더, 건너뜁니다.
-  fgets(line, sizeof(line), fp);
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return;
+  }
 
   while (fgets(line, sizeof(line), fp))
   {
@@ -109,20 +112,23 @@ void send_gateway_spoofing_packet(unsigned char *buffer, int buflen)
   struct thread_arg *arg;
 
   make_gateway_arp_packet(buffer);
-  arg         = malloc(sizeof(struct thread_arg));
-  arg->buffer = malloc(buflen);
+  // Optimized: Use pool instead of malloc
+  arg = get_thread_arg_from_pool();
   ft_memcpy(arg->buffer, buffer, buflen);
   ft_memcpy(arg->mac, data.gw_mac, MAC_ADDR_LEN);
   arg->buflen = buflen;
+  arg->protocol = ETH_P_ARP;
+  
   if (DEBUG)
   {
     printf("gateway spoofing packet!!\n");
     print_arp_packet(buffer);
   }
-  // TODO : clone을 써 보기
+  
   if (pthread_create(&tid, NULL, send_fake_arp_reply, (void *)arg) != 0)
   {
     perror("pthread_create failed");
+    return_thread_arg_to_pool(arg);
     exit(EXIT_FAILURE);
   }
   if (pthread_detach(tid) != 0)

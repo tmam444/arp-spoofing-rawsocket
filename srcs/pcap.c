@@ -1,12 +1,13 @@
 #include "malcolm.h"
 #include <fcntl.h>
+#include <sys/uio.h>
 
 // Initialize PCAP file
 int init_pcap_file(const char *filename)
 {
   int fd;
 
-  fd = open(filename, O_CREAT | O_RDWR);
+  fd = open(filename, O_CREAT | O_RDWR, 0644);
   ft_assert(fd != -1, "Failed to open PCAP file");
   if (DEBUG)
     printf("make pcap file!!\n");
@@ -19,7 +20,9 @@ int init_pcap_file(const char *filename)
     .snaplen       = 65535,
     .network       = 1 // Ethernet
   };
-  write(fd, &file_header, sizeof(file_header));
+  if (write(fd, &file_header, sizeof(file_header)) < 0) {
+    perror("Failed to write PCAP header");
+  }
   return fd;
 }
 
@@ -32,6 +35,15 @@ void save_packet_to_pcap(int fd, unsigned char *buffer, int buflen)
   struct pcap_packet_header pkt_header = {
     .ts_sec = ts.tv_sec, .ts_usec = ts.tv_usec, .incl_len = buflen, .orig_len = buflen
   };
-  write(fd, &pkt_header, sizeof(pkt_header));
-  write(fd, buffer, buflen);
+  
+  // Optimized: Use writev for atomic write operation
+  struct iovec iov[2];
+  iov[0].iov_base = &pkt_header;
+  iov[0].iov_len = sizeof(pkt_header);
+  iov[1].iov_base = buffer;
+  iov[1].iov_len = buflen;
+  
+  if (writev(fd, iov, 2) < 0) {
+    perror("Failed to write packet to PCAP");
+  }
 }

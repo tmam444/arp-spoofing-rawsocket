@@ -1,0 +1,14 @@
+# Build artifacts
+ft_malcolm
+*.o
+objs/
+libft/*.o
+libft/libft.a
+
+# Test files
+*.pcap
+test.pcap
+
+# Temporary files
+*~
+.DS_Store

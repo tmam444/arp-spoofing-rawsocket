@@ -58,7 +58,7 @@ SRCS_B=ft_lstnew.c \
 OBJS = $(SRCS:.c=.o)
 OBJS_B = $(SRCS_B:.c=.o)
 CC = cc
-CFLAGS = -Wall -Wextra -Werror # -g3 -fsanitize=address
+CFLAGS = -Wall -Wextra -Werror -O3 -flto # -g3 -fsanitize=address
 
 $(NAME) : $(OBJS)
 		ar -rcs $@ $^
