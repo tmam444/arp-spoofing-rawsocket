@@ -19,7 +19,7 @@ SRCS=srcs/main.c \
 OBJS = $(addprefix objs/, $(notdir $(SRCS:.c=.o)))
 HEADERS= -I ./includes
 CC = cc
-CFLAGS = -Wall -Wextra -Werror
+CFLAGS = -Wall -Wextra -Werror -O3 -march=native -flto
 LIBFT_PATH=./libft
 LIBFT=$(LIBFT_PATH)/libft.a
 # FSANITIZE = -fsanitize=address -g
