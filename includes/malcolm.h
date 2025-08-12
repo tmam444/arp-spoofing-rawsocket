@@ -41,11 +41,18 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define DEBUG        0
-#define ETH_MIN      60
-#define MAC_ADDR_LEN 6
-#define IP_ADDR_LEN  4
-#define BUFFER_SIZE  65535
+#define DEBUG         0
+#define ETH_MIN       60
+#define MAC_ADDR_LEN  6
+#define IP_ADDR_LEN   4
+#define IPV6_ADDR_LEN 16
+#define BUFFER_SIZE   65535
+
+// ICMPv6 NDP message types
+#define ICMPV6_ND_NS  135  // Neighbor Solicitation
+#define ICMPV6_ND_NA  136  // Neighbor Advertisement
+#define ICMPV6_ND_RS  133  // Router Solicitation
+#define ICMPV6_ND_RA  134  // Router Advertisement
 
 // PCAP file header structure
 struct pcap_file_header
@@ -94,6 +101,7 @@ struct mitm
     struct in6_addr    target_ipv6;
     unsigned char      target_mac[MAC_ADDR_LEN];
     struct in_addr     gw_ipv4;
+    struct in6_addr    gw_ipv6;
     unsigned char      gw_mac[MAC_ADDR_LEN];
     struct sockaddr_ll saddr;
     IP_TYPE            ip_type;
@@ -117,6 +125,23 @@ struct arp_packet
     unsigned char target_ip[4];  // 대상 IP 주소
 };
 
+// IPv6 NDP Neighbor Advertisement structure
+struct ndp_packet
+{
+    struct icmp6_hdr icmp6_hdr;    // ICMPv6 header
+    unsigned char    target_ip[16]; // Target IPv6 address (128 bits)
+    unsigned char    option_type;   // NDP option type (2 = Target Link-Layer Address)
+    unsigned char    option_length; // Option length (1 = 8 bytes)
+    unsigned char    target_mac[6]; // Target MAC address
+};
+
+// Complete IPv6 packet structure for NDP
+struct ipv6_ndp_packet
+{
+    struct ip6_hdr   ipv6_hdr;  // IPv6 header
+    struct ndp_packet ndp;      // NDP payload
+};
+
 extern struct mitm data;
 
 // interface
@@ -126,10 +151,13 @@ void select_interface();
 int  ft_assert(int check, const char *format, ...);
 void cleanup_handler(int signo);
 void print_arp_packet(const unsigned char *buffer);
+void print_ndp_packet(const unsigned char *buffer);
 void print_mac(const char *prefix, const unsigned char mac[6], const char *suffix);
 void print_ipv4(const char *prefix, const unsigned char ip[4], const char *suffix);
+void print_ipv6(const char *prefix, const unsigned char ip[16], const char *suffix);
 void print_ether_hdr(const struct ethhdr *eth);
 void print_arp_hdr(const struct arp_packet *arp_hdr);
+void print_ndp_hdr(const struct ndp_packet *ndp_hdr);
 
 // pcap file
 int  init_pcap_file(const char *filename);
@@ -138,9 +166,12 @@ void save_packet_to_pcap(int fd, unsigned char *buffer, int buflen);
 // spoof gateway
 void send_gateway_spoofing_packet(unsigned char *buffer, int buflen);
 void send_gateway_arp_request_packet(unsigned char *buffer, int buflen);
+void send_gateway_ndp_request_packet(unsigned char *buffer, int buflen);
 void make_gateway_arp_packet(unsigned char *buffer);
+void make_gateway_ndp_packet(unsigned char *buffer);
 
 // send thread func
 void *send_fake_arp_reply(void *arg);
+void *send_fake_ndp_reply(void *arg);
 
 #endif
